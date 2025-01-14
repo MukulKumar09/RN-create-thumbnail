@@ -7,6 +7,7 @@ import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Build.VERSION;
+import android.os.Environment;
 import android.text.TextUtils;
 import android.webkit.URLUtil;
 
@@ -34,6 +35,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+
 public class CreateThumbnailModule extends ReactContextBaseJavaModule {
 
     private final ReactApplicationContext reactContext;
@@ -53,7 +55,7 @@ public class CreateThumbnailModule extends ReactContextBaseJavaModule {
         new ProcessDataTask(reactContext, promise, options).execute();
     }
 
-    private static class ProcessDataTask extends GuardedResultAsyncTask<ReadableMap> {
+    private static class ProcessDataTask extends GuardedResultAsyncTask<String> {
         private final WeakReference<Context> weakContext;
         private final Promise promise;
         private final ReadableMap options;
@@ -66,75 +68,92 @@ public class CreateThumbnailModule extends ReactContextBaseJavaModule {
         }
 
         @Override
-        protected ReadableMap doInBackgroundGuarded() {
-            String format = options.hasKey("format") ? options.getString("format") : "jpeg";
-            String cacheName = options.hasKey("cacheName") ? options.getString("cacheName") : "";
-
-            String thumbnailDir = weakContext.get().getApplicationContext().getCacheDir().getAbsolutePath() + "/thumbnails";
+        protected String doInBackgroundGuarded() {
+            //extract data
+            //replicate filepath in cache
+            String fileParent=options.getString("parent");
+            String thumbnailDir = weakContext.get().getExternalCacheDir()+ "/thumbnails"+fileParent;
             File cacheDir = createDirIfNotExists(thumbnailDir);
-            if (!TextUtils.isEmpty(cacheName)) {
-                File file = new File(thumbnailDir, cacheName + "." + format);
-                if (file.exists()) {
-                    WritableMap map = Arguments.createMap();
-                    map.putString("path", "file://" + file.getAbsolutePath());
-                    Bitmap image = BitmapFactory.decodeFile(file.getAbsolutePath());
-                    map.putDouble("size", image.getByteCount());
-                    map.putString("mime", "image/" + format);
-                    map.putDouble("width", image.getWidth());
-                    map.putDouble("height", image.getHeight());
-                    return map;
-                }
-            }
+            String fileName=options.getString("name");
+            String ext = options.getString("ext").equals("png")?"png":"jpg";
+            String fileToSave=fileName+"."+ext;
+            File file = new File(cacheDir, fileToSave);
+            if (file.exists()) {
+                return "icon exists";
+            }else{
+            String fileUrl=options.getString("path");
+            String filePath ="file://" +fileUrl;
+            String mediaType = options.getString("mediaType");
 
-            String filePath = options.hasKey("url") ? options.getString("url") : "";
-            int dirSize = options.hasKey("dirSize") ? options.getInt("dirSize") : 100;
-            int timeStamp = options.hasKey("timeStamp") ? options.getInt("timeStamp") : 0;
-            int maxWidth = options.hasKey("maxWidth") ? options.getInt("maxWidth") : 512;
-            int maxHeight = options.hasKey("maxHeight") ? options.getInt("maxHeight") : 512;
-            boolean onlySyncedFrames = options.hasKey("onlySyncedFrames") ? options.getBoolean("onlySyncedFrames") : true;
-            HashMap headers = options.hasKey("headers") ? options.getMap("headers").toHashMap() : new HashMap<String, String>();
-            String fileName = TextUtils.isEmpty(cacheName) ? ("thumb-" + UUID.randomUUID().toString()) : cacheName + "." + format;
+            
+            //initialize defaults
+            int dirSize = 100;
+            int timeStamp = 1000;
+            int maxWidth = 200;
+            int maxHeight = 200;
+            boolean onlySyncedFrames =true;
+            HashMap headers = new HashMap<String, String>();
             OutputStream fOut = null;
+            
             try {
-                File file = new File(cacheDir, fileName);
                 Context context = weakContext.get();
-                Bitmap image = getBitmapAtTime(context, filePath, timeStamp, maxWidth, maxHeight, onlySyncedFrames, headers);
-                file.createNewFile();
-                fOut = new FileOutputStream(file);
+                Bitmap image=null;
+                if(mediaType.equals("video")){
+                    image = getVideoBitmapAtTime(context, filePath, timeStamp, maxWidth, maxHeight, onlySyncedFrames, headers);
+                }
+                else if(mediaType.equals("image")){
+                    String newPath = filePath.replace("file://", "");
+                    Bitmap inputBitmap = BitmapFactory.decodeFile(newPath);
+                    int width = inputBitmap.getWidth();
+                    int height = inputBitmap.getHeight();
+                    float ratioBitmap = (float) width / (float) height;
+                    float ratioMax = (float) maxWidth / (float) maxHeight;
 
-                // 100 means no compression, the lower you go, the stronger the compression
-                if (format.equals("png")) {
-                    image.compress(Bitmap.CompressFormat.PNG, 100, fOut);
+                    int finalWidth = maxWidth;
+                    int finalHeight = maxHeight;
+                    if (ratioMax > ratioBitmap) {
+                        finalWidth = (int) ((float)maxHeight * ratioBitmap);
+                    } else {
+                        finalHeight = (int) ((float)maxWidth / ratioBitmap);
+                    }
+
+                    image = Bitmap.createScaledBitmap(inputBitmap, finalWidth,finalHeight, true);
+                }
+                
+                if(image==null){
+                    return "failed";
                 } else {
-                    image.compress(Bitmap.CompressFormat.JPEG, 90, fOut);
+                    file.createNewFile();
+                    fOut = new FileOutputStream(file);
+
+                    // 100 means no compression, the lower you go, the stronger the compression
+                    if (ext.equals("png")) {
+                        image.compress(Bitmap.CompressFormat.PNG, 100, fOut);
+                    } else {
+                        image.compress(Bitmap.CompressFormat.JPEG, 100, fOut);
+                    }
+
+                    fOut.flush();
+                    fOut.close();
+
+                    long cacheDirSize = (long) dirSize * 1024 * 1024;
+                    long newSize = image.getByteCount() + getDirSize(cacheDir);
+                    // free up some cached data if size of cache dir exceeds CACHE_DIR_MAX_SIZE
+                    if (newSize > cacheDirSize) {
+                        cleanDir(cacheDir, cacheDirSize / 2);
+                    }
                 }
-
-                fOut.flush();
-                fOut.close();
-
-                long cacheDirSize = (long) dirSize * 1024 * 1024;
-                long newSize = image.getByteCount() + getDirSize(cacheDir);
-                // free up some cached data if size of cache dir exceeds CACHE_DIR_MAX_SIZE
-                if (newSize > cacheDirSize) {
-                    cleanDir(cacheDir, cacheDirSize / 2);
-                }
-
-                WritableMap map = Arguments.createMap();
-                map.putString("path", "file://" + file.getAbsolutePath());
-                map.putDouble("size", image.getByteCount());
-                map.putString("mime", "image/" + format);
-                map.putDouble("width", image.getWidth());
-                map.putDouble("height", image.getHeight());
-                return map;
             } catch (Exception e) {
-                promise.reject("CreateThumbnail_ERROR", e);
+                return e.getMessage();
+                // promise.reject("CreateThumbnail_ERROR", e);
             }
-            return null;
+            return "success";
+            }
         }
 
         @Override
-        protected void onPostExecuteGuarded(ReadableMap readableArray) {
-            promise.resolve(readableArray);
+        protected void onPostExecuteGuarded(String result) {
+            promise.resolve(result);
         }
     }
 
@@ -172,7 +191,7 @@ public class CreateThumbnailModule extends ReactContextBaseJavaModule {
         return dir;
     }
 
-    private static Bitmap getBitmapAtTime(Context context, String filePath, int time, int maxWidth, int maxHeight, boolean onlySyncedFrames, Map headers) throws IOException, IllegalStateException {
+    private static Bitmap getVideoBitmapAtTime(Context context, String filePath, int time, int maxWidth, int maxHeight, boolean onlySyncedFrames, Map headers) throws IOException, IllegalStateException {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         if (URLUtil.isFileUrl(filePath)) {
             String decodedPath;
@@ -206,9 +225,6 @@ public class CreateThumbnailModule extends ReactContextBaseJavaModule {
             retriever.release();
         } catch(IOException e) {
             e.printStackTrace();
-        }
-        if (image == null) {
-            throw new IllegalStateException("File doesn't exist or not supported");
         }
         return image;
     }
